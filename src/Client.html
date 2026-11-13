@@ -1,0 +1,926 @@
+<script>
+(function () {
+  'use strict';
+
+  var state = {
+    connected: false,
+    connection: null,
+    settings: null,
+    plots: [],
+    bins: [],
+    seasons: [],
+    activeSeasonId: '',
+    harvest: [],
+    oil: null,
+    page: 'harvest',
+    charts: { net: null, yield: null }
+  };
+
+  var $ = function (id) { return document.getElementById(id); };
+
+  function showToast(msg, type) {
+    var el = $('toast');
+    el.textContent = msg;
+    el.className = 'toast show' + (type ? ' ' + type : '');
+    clearTimeout(showToast._t);
+    showToast._t = setTimeout(function () {
+      el.classList.remove('show');
+    }, 2800);
+  }
+
+  function setLoading(on) {
+    $('loading').classList.toggle('show', !!on);
+  }
+
+  function run(fnName, args, onSuccess, onFailure) {
+    setLoading(true);
+    var runner = google.script.run
+      .withSuccessHandler(function (res) {
+        setLoading(false);
+        if (!res || res.ok === false) {
+          var err = (res && res.error) || 'שגיאה לא ידועה';
+          if (onFailure) onFailure(err, res);
+          else showToast(err, 'error');
+          return;
+        }
+        if (onSuccess) onSuccess(res.data, res);
+      })
+      .withFailureHandler(function (err) {
+        setLoading(false);
+        var msg = (err && err.message) || String(err) || 'שגיאת תקשורת';
+        if (onFailure) onFailure(msg);
+        else showToast(msg, 'error');
+      });
+
+    args = args || [];
+    runner[fnName].apply(runner, args);
+  }
+
+  function numOrEmpty(v) {
+    if (v === null || v === undefined || v === '') return null;
+    var n = Number(v);
+    return isNaN(n) ? null : n;
+  }
+
+  function fmt(n, digits) {
+    if (n === null || n === undefined || isNaN(n)) return '—';
+    return Number(n).toLocaleString('he-IL', {
+      minimumFractionDigits: digits || 0,
+      maximumFractionDigits: digits === undefined ? 2 : digits
+    });
+  }
+
+  function toLocalInputValue(isoOrDate) {
+    var d;
+    if (!isoOrDate) d = new Date();
+    else d = new Date(isoOrDate);
+    if (isNaN(d.getTime())) d = new Date();
+    var pad = function (n) { return String(n).padStart(2, '0'); };
+    // datetime-local is wall-clock; use local components
+    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) +
+      'T' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+  }
+
+  function fromLocalInputValue(v) {
+    if (!v) return '';
+    var d = new Date(v);
+    if (isNaN(d.getTime())) return v;
+    return d.toISOString();
+  }
+
+  function getActiveSeason() {
+    return state.seasons.find(function (s) { return s.id === state.activeSeasonId; }) || null;
+  }
+
+  function calcNetPreview() {
+    var bins = Number($('binCount').value) || 0;
+    var gross = Number($('grossKg').value);
+    var tare = Number($('tarePerBin').value);
+    var leaves = Number($('leavesKg').value);
+    if (isNaN(gross)) gross = 0;
+    if (isNaN(tare)) tare = 0;
+    if (isNaN(leaves)) leaves = 0;
+    var net = gross - (bins * tare) - leaves;
+    $('netPreview').textContent = fmt(net, 1);
+
+    var sample = numOrEmpty($('sample10g').value);
+    if (sample && sample > 0) {
+      var avg = sample / 10;
+      $('avgOlivePreview').textContent = fmt(avg, 2) + ' גרם';
+      if (net > 0) {
+        $('estCountPreview').textContent = Math.round((net * 1000) / avg).toLocaleString('he-IL') + ' (הערכה)';
+      } else {
+        $('estCountPreview').textContent = '—';
+      }
+    } else {
+      $('avgOlivePreview').textContent = '—';
+      $('estCountPreview').textContent = '—';
+    }
+  }
+
+  function showSetup(show) {
+    $('setupScreen').classList.toggle('hidden', !show);
+    $('appShell').classList.toggle('hidden', show);
+  }
+
+  function applyBootstrap(data) {
+    state.connected = !!data.connected;
+    state.connection = data.connection || null;
+    if (!state.connected) {
+      showSetup(true);
+      return;
+    }
+    showSetup(false);
+    state.settings = data.settings || {};
+    state.plots = data.plots || [];
+    state.bins = data.bins || [];
+    state.seasons = data.seasons || [];
+    state.activeSeasonId = data.activeSeasonId || state.settings.active_season_id || '';
+    state.harvest = data.harvest || [];
+    state.oil = data.oil || null;
+
+    $('tarePerBin').value = state.settings.default_tare_kg;
+    $('defaultTare').value = state.settings.default_tare_kg;
+    $('oilDensity').value = state.settings.oil_density;
+    $('arrivalAt').value = toLocalInputValue();
+
+    renderConnection();
+    renderActiveSeason();
+    renderSeasonTotals();
+    renderOil();
+    renderHarvestList();
+    renderPlots();
+    renderBins();
+    renderSeasons();
+    updateBrandSub();
+  }
+
+  function updateBrandSub() {
+    var s = getActiveSeason();
+    if (s) {
+      $('brandSub').textContent = 'עונה ' + s.year + (s.plotName ? ' · ' + s.plotName : '');
+    } else {
+      $('brandSub').textContent = 'בחרו או צרו עונת מסיק בהגדרות';
+    }
+  }
+
+  function renderConnection() {
+    var c = state.connection || {};
+    $('connChip').textContent = 'מחובר';
+    $('settingsConnection').innerHTML =
+      '<div><strong>' + escapeHtml(c.spreadsheetName || '') + '</strong></div>' +
+      '<div class="muted">' + escapeHtml(c.spreadsheetId || '') + '</div>';
+    $('btnOpenSheet').onclick = function () {
+      if (c.spreadsheetUrl) window.open(c.spreadsheetUrl, '_blank');
+    };
+  }
+
+  function renderActiveSeason() {
+    var s = getActiveSeason();
+    if (!s) {
+      $('activeSeasonLabel').textContent = 'לא נבחרה עונה';
+      return;
+    }
+    var status = s.status === 'סגורה' ? ' (סגורה)' : '';
+    $('activeSeasonLabel').textContent = s.year + ' · ' + (s.plotName || 'חלקה') + status;
+  }
+
+  function renderSeasonTotals() {
+    var records = state.harvest || [];
+    var net = 0, bins = 0, gross = 0;
+    records.forEach(function (r) {
+      net += Number(r.netKg) || 0;
+      bins += Number(r.binCount) || 0;
+      gross += Number(r.grossKg) || 0;
+    });
+    var avg = bins > 0 ? net / bins : null;
+    $('seasonTotals').innerHTML =
+      tile('נטו כולל', fmt(net, 1) + ' ק״ג') +
+      tile('דולבים', fmt(bins, 0)) +
+      tile('שקילות', fmt(records.length, 0)) +
+      tile('ממוצע לדולב', avg === null ? '—' : fmt(avg, 1) + ' ק״ג');
+  }
+
+  function tile(k, v) {
+    return '<div class="stat-tile"><div class="k">' + k + '</div><div class="v">' + v + '</div></div>';
+  }
+
+  function renderOil() {
+    var oil = state.oil;
+    var net = 0;
+    (state.harvest || []).forEach(function (r) { net += Number(r.netKg) || 0; });
+    if (!oil) {
+      $('oilSummary').textContent = 'טרם הוזן';
+      $('oilQuantity').value = '';
+      return;
+    }
+    var yieldPct = net > 0 ? ((oil.oilKg / net) * 100) : null;
+    $('oilSummary').innerHTML =
+      '<strong>' + fmt(oil.oilKg, 2) + ' ק״ג</strong> / ' +
+      fmt(oil.oilL, 2) + ' ל׳ · תפוקה: ' +
+      (yieldPct === null ? '—' : fmt(yieldPct, 1) + '%');
+    $('oilQuantity').value = oil.quantity;
+    $('oilUnit').value = oil.unit === 'l' ? 'l' : 'kg';
+  }
+
+  function renderHarvestList() {
+    var list = $('harvestList');
+    var records = state.harvest || [];
+    $('harvestCountLabel').textContent = records.length ? records.length + ' רשומות' : '';
+    if (!records.length) {
+      list.innerHTML = '<div class="empty">עדיין אין רשומות לעונה זו</div>';
+      return;
+    }
+    list.innerHTML = records.map(function (r) {
+      return (
+        '<article class="record-card" data-id="' + escapeAttr(r.id) + '">' +
+          '<div class="record-top">' +
+            '<div>' +
+              '<div><strong>#' + r.entryNumber + '</strong> · ' + escapeHtml(r.arrivalDisplay || '') + '</div>' +
+              '<div class="record-meta">' +
+                r.binCount + ' דולבים · ברוטו ' + fmt(r.grossKg, 1) + ' ק״ג' +
+                (r.groupedWeighing ? ' <span class="badge">שקילה קבוצתית</span>' : '') +
+              '</div>' +
+            '</div>' +
+            '<div class="record-net">' + fmt(r.netKg, 1) + ' ק״ג</div>' +
+          '</div>' +
+          '<div class="record-details small">' +
+            detailLine('טרה ליחידה', fmt(r.tarePerBinKg, 2) + ' ק״ג') +
+            detailLine('טרה כוללת', fmt(r.totalTareKg, 2) + ' ק״ג') +
+            detailLine('עלים', r.leavesKg === null ? '—' : fmt(r.leavesKg, 2) + ' ק״ג') +
+            detailLine('מדגם 10 זיתים', r.sample10g === null ? '—' : fmt(r.sample10g, 1) + ' גרם') +
+            detailLine('ממוצע לזית', r.avgOliveG === null ? '—' : fmt(r.avgOliveG, 2) + ' גרם') +
+            detailLine('הערכת מספר זיתים', r.estimatedOliveCount === null ? '—' : fmt(r.estimatedOliveCount, 0)) +
+            detailLine('קוטר ממוצע', r.avgDiameterMm === null ? '—' : fmt(r.avgDiameterMm, 1) + ' מ״מ') +
+            detailLine('בשלות', r.ripeness || '—') +
+            detailLine('מצב פרי', r.fruitCondition || '—') +
+            detailLine('תאריך מסיק בפועל', r.actualHarvestDate || '—') +
+            detailLine('הערות', r.notes || '—') +
+            '<div class="row" style="margin-top:10px">' +
+              '<button type="button" class="btn btn-secondary grow btn-edit-harvest">עריכה</button>' +
+              '<button type="button" class="btn btn-danger grow btn-delete-harvest">מחיקה</button>' +
+            '</div>' +
+          '</div>' +
+        '</article>'
+      );
+    }).join('');
+
+    list.querySelectorAll('.record-card').forEach(function (card) {
+      card.addEventListener('click', function (e) {
+        if (e.target.closest('button')) return;
+        card.classList.toggle('open');
+      });
+      var id = card.getAttribute('data-id');
+      var rec = records.find(function (r) { return r.id === id; });
+      card.querySelector('.btn-edit-harvest').addEventListener('click', function (e) {
+        e.stopPropagation();
+        fillHarvestForm(rec);
+        showToast('עריכת רשומה #' + rec.entryNumber);
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      });
+      card.querySelector('.btn-delete-harvest').addEventListener('click', function (e) {
+        e.stopPropagation();
+        if (!confirm('למחוק את רשומה #' + rec.entryNumber + '?')) return;
+        run('deleteHarvest', [id], function () {
+          showToast('הרשומה נמחקה', 'success');
+          refreshHarvest();
+        });
+      });
+    });
+  }
+
+  function detailLine(k, v) {
+    return '<div class="row" style="justify-content:space-between"><span class="muted">' + k + '</span><span>' + escapeHtml(String(v)) + '</span></div>';
+  }
+
+  function fillHarvestForm(r) {
+    $('editingHarvestId').value = r.id;
+    $('binCount').value = r.binCount;
+    $('grossKg').value = r.grossKg;
+    $('tarePerBin').value = r.tarePerBinKg;
+    $('leavesKg').value = r.leavesKg === null ? '' : r.leavesKg;
+    $('arrivalAt').value = toLocalInputValue(r.arrivalAt);
+    $('sample10g').value = r.sample10g === null ? '' : r.sample10g;
+    $('avgDiameterMm').value = r.avgDiameterMm === null ? '' : r.avgDiameterMm;
+    $('ripeness').value = r.ripeness || '';
+    $('fruitCondition').value = r.fruitCondition || '';
+    $('actualHarvestDate').value = r.actualHarvestDate || '';
+    $('harvestNotes').value = r.notes || '';
+    $('advancedFields').open = !!(r.sample10g || r.avgDiameterMm || r.ripeness || r.fruitCondition || r.actualHarvestDate || r.notes);
+    $('btnSaveHarvest').textContent = 'עדכון רשומה';
+    calcNetPreview();
+  }
+
+  function resetHarvestForm() {
+    $('editingHarvestId').value = '';
+    $('binCount').value = 1;
+    $('grossKg').value = '';
+    $('tarePerBin').value = (state.settings && state.settings.default_tare_kg) || 25;
+    $('leavesKg').value = '';
+    $('arrivalAt').value = toLocalInputValue();
+    $('sample10g').value = '';
+    $('avgDiameterMm').value = '';
+    $('ripeness').value = '';
+    $('fruitCondition').value = '';
+    $('actualHarvestDate').value = '';
+    $('harvestNotes').value = '';
+    $('advancedFields').open = false;
+    $('btnSaveHarvest').textContent = 'שמור דולב';
+    calcNetPreview();
+  }
+
+  function collectHarvestPayload() {
+    var season = getActiveSeason();
+    return {
+      id: $('editingHarvestId').value || undefined,
+      seasonId: state.activeSeasonId,
+      plotId: season ? season.plotId : undefined,
+      binCount: Number($('binCount').value),
+      grossKg: Number($('grossKg').value),
+      tarePerBinKg: Number($('tarePerBin').value),
+      leavesKg: $('leavesKg').value === '' ? null : Number($('leavesKg').value),
+      arrivalAt: fromLocalInputValue($('arrivalAt').value),
+      sample10g: $('sample10g').value === '' ? null : Number($('sample10g').value),
+      avgDiameterMm: $('avgDiameterMm').value === '' ? null : Number($('avgDiameterMm').value),
+      ripeness: $('ripeness').value,
+      fruitCondition: $('fruitCondition').value,
+      actualHarvestDate: $('actualHarvestDate').value,
+      notes: $('harvestNotes').value
+    };
+  }
+
+  function refreshHarvest() {
+    if (!state.activeSeasonId) {
+      state.harvest = [];
+      state.oil = null;
+      renderSeasonTotals();
+      renderOil();
+      renderHarvestList();
+      return;
+    }
+    run('listHarvest', [state.activeSeasonId], function (harvest) {
+      state.harvest = harvest || [];
+      renderSeasonTotals();
+      renderHarvestList();
+      run('getOil', [state.activeSeasonId], function (oil) {
+        state.oil = oil;
+        renderOil();
+      });
+    });
+  }
+
+  function refreshBootstrap() {
+    run('getAppBootstrap', [], function (data) {
+      applyBootstrap(data);
+      if (state.page === 'stats') loadStats();
+    });
+  }
+
+  function renderPlots() {
+    var el = $('plotsList');
+    if (!state.plots.length) {
+      el.innerHTML = '<div class="empty">אין חלקות עדיין — הוסיפו חלקה</div>';
+      return;
+    }
+    el.innerHTML = state.plots.map(function (p) {
+      return (
+        '<div class="list-item" data-id="' + escapeAttr(p.id) + '">' +
+          '<div>' +
+            '<strong>' + escapeHtml(p.name) + '</strong>' +
+            '<div class="small muted">' + escapeHtml(p.variety || 'ללא זן') +
+              (p.areaDunams !== null ? ' · ' + p.areaDunams + ' דונם' : '') +
+              (p.treeCount !== null ? ' · ' + p.treeCount + ' עצים' : '') +
+            '</div>' +
+          '</div>' +
+          '<div class="row">' +
+            '<button type="button" class="btn btn-ghost btn-edit-plot">עריכה</button>' +
+            '<button type="button" class="btn btn-danger btn-del-plot">מחיקה</button>' +
+          '</div>' +
+        '</div>'
+      );
+    }).join('');
+
+    el.querySelectorAll('.list-item').forEach(function (item) {
+      var id = item.getAttribute('data-id');
+      var plot = state.plots.find(function (p) { return p.id === id; });
+      item.querySelector('.btn-edit-plot').onclick = function () { openPlotModal(plot); };
+      item.querySelector('.btn-del-plot').onclick = function () {
+        if (!confirm('למחוק את החלקה "' + plot.name + '"?')) return;
+        run('deletePlot', [id], function () {
+          showToast('החלקה נמחקה', 'success');
+          refreshBootstrap();
+        });
+      };
+    });
+  }
+
+  function renderBins() {
+    var el = $('binsList');
+    if (!state.bins.length) {
+      el.innerHTML = '<div class="empty">אין דולבים שמורים</div>';
+      return;
+    }
+    el.innerHTML = state.bins.map(function (b) {
+      return (
+        '<div class="list-item" data-id="' + escapeAttr(b.id) + '">' +
+          '<div><strong>' + escapeHtml(b.name) + '</strong>' +
+            '<div class="small muted">טרה ' + fmt(b.tareKg, 2) + ' ק״ג</div></div>' +
+          '<div class="row">' +
+            '<button type="button" class="btn btn-ghost btn-use-bin">השתמש</button>' +
+            '<button type="button" class="btn btn-ghost btn-edit-bin">עריכה</button>' +
+            '<button type="button" class="btn btn-danger btn-del-bin">מחיקה</button>' +
+          '</div>' +
+        '</div>'
+      );
+    }).join('');
+
+    el.querySelectorAll('.list-item').forEach(function (item) {
+      var id = item.getAttribute('data-id');
+      var bin = state.bins.find(function (b) { return b.id === id; });
+      item.querySelector('.btn-use-bin').onclick = function () {
+        $('tarePerBin').value = bin.tareKg;
+        calcNetPreview();
+        navigate('harvest');
+        showToast('נטענה טרה של ' + bin.name);
+      };
+      item.querySelector('.btn-edit-bin').onclick = function () { openBinModal(bin); };
+      item.querySelector('.btn-del-bin').onclick = function () {
+        if (!confirm('למחוק את הדולב "' + bin.name + '"?')) return;
+        run('deleteBin', [id], function () {
+          showToast('הדולב נמחק', 'success');
+          refreshBootstrap();
+        });
+      };
+    });
+  }
+
+  function renderSeasons() {
+    var el = $('seasonsList');
+    if (!state.seasons.length) {
+      el.innerHTML = '<div class="empty">אין עונות — צרו עונה חדשה</div>';
+      return;
+    }
+    el.innerHTML = state.seasons.map(function (s) {
+      var active = s.id === state.activeSeasonId;
+      return (
+        '<div class="list-item" data-id="' + escapeAttr(s.id) + '">' +
+          '<div>' +
+            '<strong>' + s.year + ' · ' + escapeHtml(s.plotName || '') + '</strong>' +
+            (active ? ' <span class="badge">נבחרת</span>' : '') +
+            '<div class="small muted">' + escapeHtml(s.status) + ' · התחלה ' + escapeHtml(s.startDate) + '</div>' +
+          '</div>' +
+          '<div class="row">' +
+            (!active ? '<button type="button" class="btn btn-secondary btn-activate">בחירה</button>' : '') +
+            '<button type="button" class="btn btn-ghost btn-edit-season">עריכה</button>' +
+            (s.status === 'פעילה'
+              ? '<button type="button" class="btn btn-ghost btn-close-season">סגירה</button>'
+              : '<button type="button" class="btn btn-ghost btn-reopen-season">פתיחה</button>') +
+          '</div>' +
+        '</div>'
+      );
+    }).join('');
+
+    el.querySelectorAll('.list-item').forEach(function (item) {
+      var id = item.getAttribute('data-id');
+      var season = state.seasons.find(function (s) { return s.id === id; });
+      var act = item.querySelector('.btn-activate');
+      if (act) act.onclick = function () {
+        run('setActiveSeason', [id], function () {
+          state.activeSeasonId = id;
+          showToast('העונה נבחרה', 'success');
+          refreshBootstrap();
+        });
+      };
+      item.querySelector('.btn-edit-season').onclick = function () { openSeasonModal(season); };
+      var closeBtn = item.querySelector('.btn-close-season');
+      if (closeBtn) closeBtn.onclick = function () {
+        run('closeSeason', [id], function () {
+          showToast('העונה נסגרה', 'success');
+          refreshBootstrap();
+        });
+      };
+      var reopenBtn = item.querySelector('.btn-reopen-season');
+      if (reopenBtn) reopenBtn.onclick = function () {
+        run('reopenSeason', [id], function () {
+          showToast('העונה נפתחה מחדש', 'success');
+          refreshBootstrap();
+        });
+      };
+    });
+  }
+
+  function openModal(html) {
+    $('modalContent').innerHTML = html;
+    $('modalBackdrop').classList.add('show');
+  }
+
+  function closeModal() {
+    $('modalBackdrop').classList.remove('show');
+    $('modalContent').innerHTML = '';
+  }
+
+  function openPlotModal(plot) {
+    plot = plot || {};
+    openModal(
+      '<h3>' + (plot.id ? 'עריכת חלקה' : 'חלקה חדשה') + '</h3>' +
+      '<div class="stack">' +
+        field('plotName', 'שם חלקה', plot.name || '') +
+        field('plotVariety', 'זן', plot.variety || '') +
+        field('plotArea', 'שטח בדונם', plot.areaDunams === null || plot.areaDunams === undefined ? '' : plot.areaDunams, 'number') +
+        field('plotTrees', 'מספר עצים', plot.treeCount === null || plot.treeCount === undefined ? '' : plot.treeCount, 'number') +
+        field('plotNotes', 'הערות', plot.notes || '', 'text') +
+        '<div class="row">' +
+          '<button type="button" class="btn btn-primary grow" id="modalSave">שמירה</button>' +
+          '<button type="button" class="btn btn-ghost grow" id="modalCancel">ביטול</button>' +
+        '</div>' +
+      '</div>'
+    );
+    $('modalCancel').onclick = closeModal;
+    $('modalSave').onclick = function () {
+      run('savePlot', [{
+        id: plot.id,
+        name: $('plotName').value,
+        variety: $('plotVariety').value,
+        areaDunams: $('plotArea').value === '' ? null : Number($('plotArea').value),
+        treeCount: $('plotTrees').value === '' ? null : Number($('plotTrees').value),
+        notes: $('plotNotes').value
+      }], function () {
+        closeModal();
+        showToast('החלקה נשמרה', 'success');
+        refreshBootstrap();
+      });
+    };
+  }
+
+  function openBinModal(bin) {
+    bin = bin || { tareKg: state.settings.default_tare_kg };
+    openModal(
+      '<h3>' + (bin.id ? 'עריכת דולב' : 'דולב חדש') + '</h3>' +
+      '<div class="stack">' +
+        field('binName', 'שם', bin.name || '') +
+        field('binTare', 'משקל טרה (ק״ג)', bin.tareKg, 'number') +
+        field('binNotes', 'הערות', bin.notes || '') +
+        '<div class="row">' +
+          '<button type="button" class="btn btn-primary grow" id="modalSave">שמירה</button>' +
+          '<button type="button" class="btn btn-ghost grow" id="modalCancel">ביטול</button>' +
+        '</div>' +
+      '</div>'
+    );
+    $('modalCancel').onclick = closeModal;
+    $('modalSave').onclick = function () {
+      run('saveBin', [{
+        id: bin.id,
+        name: $('binName').value,
+        tareKg: Number($('binTare').value),
+        notes: $('binNotes').value
+      }], function () {
+        closeModal();
+        showToast('הדולב נשמר', 'success');
+        refreshBootstrap();
+      });
+    };
+  }
+
+  function openSeasonModal(season) {
+    season = season || {};
+    var year = season.year || new Date().getFullYear();
+    var plotOptions = state.plots.map(function (p) {
+      return '<option value="' + escapeAttr(p.id) + '"' +
+        (season.plotId === p.id ? ' selected' : '') + '>' + escapeHtml(p.name) + '</option>';
+    }).join('');
+    openModal(
+      '<h3>' + (season.id ? 'עריכת עונה' : 'עונה חדשה') + '</h3>' +
+      '<div class="stack">' +
+        field('seasonYear', 'שנה', year, 'number') +
+        '<div class="field"><label for="seasonPlot">חלקה</label><select id="seasonPlot">' +
+          '<option value="">בחרו חלקה</option>' + plotOptions +
+        '</select></div>' +
+        field('seasonStart', 'תאריך התחלה', season.startDate || toDateInput(new Date()), 'date') +
+        field('seasonNotes', 'הערות', season.notes || '') +
+        '<div class="row">' +
+          '<button type="button" class="btn btn-primary grow" id="modalSave">שמירה</button>' +
+          '<button type="button" class="btn btn-ghost grow" id="modalCancel">ביטול</button>' +
+        '</div>' +
+      '</div>'
+    );
+    $('modalCancel').onclick = closeModal;
+    $('modalSave').onclick = function () {
+      if (!state.plots.length) {
+        showToast('יש ליצור חלקה לפני עונה', 'error');
+        return;
+      }
+      run('saveSeason', [{
+        id: season.id,
+        year: Number($('seasonYear').value),
+        plotId: $('seasonPlot').value,
+        startDate: $('seasonStart').value,
+        notes: $('seasonNotes').value,
+        status: season.status || 'פעילה'
+      }], function (saved) {
+        closeModal();
+        showToast('העונה נשמרה', 'success');
+        if (!season.id && saved && saved.id) {
+          run('setActiveSeason', [saved.id], function () {
+            refreshBootstrap();
+          });
+        } else {
+          refreshBootstrap();
+        }
+      });
+    };
+  }
+
+  function field(id, label, value, type) {
+    type = type || 'text';
+    return '<div class="field"><label for="' + id + '">' + label + '</label>' +
+      '<input id="' + id + '" type="' + type + '" value="' + escapeAttr(value === null || value === undefined ? '' : value) + '" /></div>';
+  }
+
+  function toDateInput(d) {
+    var pad = function (n) { return String(n).padStart(2, '0'); };
+    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+  }
+
+  function escapeHtml(s) {
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function escapeAttr(s) {
+    return escapeHtml(s).replace(/'/g, '&#39;');
+  }
+
+  function navigate(page) {
+    state.page = page;
+    document.querySelectorAll('.page').forEach(function (p) {
+      p.classList.toggle('active', p.id === 'page-' + page);
+    });
+    document.querySelectorAll('.nav-btn').forEach(function (b) {
+      b.classList.toggle('active', b.getAttribute('data-page') === page);
+    });
+    if (page === 'stats') loadStats();
+  }
+
+  function loadStats() {
+    var seasonId = $('statsSeason').value || '';
+    var plotId = $('statsPlot').value || '';
+    run('getStatistics', [{ seasonId: seasonId, plotId: plotId }], function (data) {
+      populateStatsFilters(data);
+      renderStatsKpis(data.kpis);
+      renderCharts(data.bySeason || []);
+      renderPlotCompare(data.byPlot || []);
+    });
+  }
+
+  function populateStatsFilters(data) {
+    var seasonSel = $('statsSeason');
+    var plotSel = $('statsPlot');
+    var curS = seasonSel.value;
+    var curP = plotSel.value;
+    seasonSel.innerHTML = '<option value="">כל העונות</option>' +
+      (data.seasons || []).map(function (s) {
+        return '<option value="' + escapeAttr(s.id) + '">' + s.year + ' — ' + escapeHtml(s.plotName || '') + '</option>';
+      }).join('');
+    plotSel.innerHTML = '<option value="">כל החלקות</option>' +
+      (data.plots || []).map(function (p) {
+        return '<option value="' + escapeAttr(p.id) + '">' + escapeHtml(p.name) + '</option>';
+      }).join('');
+    if (curS) seasonSel.value = curS;
+    if (curP) plotSel.value = curP;
+  }
+
+  function renderStatsKpis(kpis) {
+    kpis = kpis || {};
+    $('statsKpis').innerHTML =
+      tile('זיתים נטו', fmt(kpis.totalNetKg, 1) + ' ק״ג') +
+      tile('דולבים / שקילות', fmt(kpis.totalBins, 0) + ' / ' + fmt(kpis.weighingCount, 0)) +
+      tile('שמן', kpis.oilEntered ? (fmt(kpis.oilKg, 2) + ' ק״ג · ' + fmt(kpis.oilL, 2) + ' ל׳') : 'טרם הוזן') +
+      tile('תפוקת שמן', kpis.yieldPct === null || kpis.yieldPct === undefined ? 'טרם הוזן' : fmt(kpis.yieldPct, 1) + '%') +
+      tile('ממוצע נטו לדולב', kpis.avgNetPerBin === null ? '—' : fmt(kpis.avgNetPerBin, 1) + ' ק״ג');
+  }
+
+  function renderCharts(bySeason) {
+    var labels = bySeason.map(function (s) { return s.label; });
+    var nets = bySeason.map(function (s) { return s.totalNetKg; });
+    var yields = bySeason.map(function (s) { return s.yieldPct; });
+
+    if (state.charts.net) state.charts.net.destroy();
+    if (state.charts.yield) state.charts.yield.destroy();
+
+    var common = {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: { legend: { display: false } }
+    };
+
+    state.charts.net = new Chart($('chartNet'), {
+      type: 'bar',
+      data: {
+        labels: labels,
+        datasets: [{
+          data: nets,
+          backgroundColor: 'rgba(82, 120, 72, 0.75)',
+          borderRadius: 8
+        }]
+      },
+      options: common
+    });
+
+    state.charts.yield = new Chart($('chartYield'), {
+      type: 'line',
+      data: {
+        labels: labels,
+        datasets: [{
+          data: yields,
+          borderColor: '#a67c2d',
+          backgroundColor: 'rgba(166, 124, 45, 0.15)',
+          spanGaps: true,
+          tension: 0.25,
+          fill: true
+        }]
+      },
+      options: common
+    });
+  }
+
+  function renderPlotCompare(byPlot) {
+    var el = $('plotCompare');
+    if (!byPlot.length) {
+      el.innerHTML = '<div class="empty">אין נתונים להשוואה</div>';
+      return;
+    }
+    el.innerHTML = byPlot.map(function (p) {
+      return (
+        '<div class="list-item">' +
+          '<div><strong>' + escapeHtml(p.plotName) + '</strong>' +
+            '<div class="small muted">' + p.seasonCount + ' עונות · ' + p.totalBins + ' דולבים</div></div>' +
+          '<div class="record-net">' + fmt(p.totalNetKg, 1) + ' ק״ג</div>' +
+        '</div>'
+      );
+    }).join('');
+  }
+
+  function bindEvents() {
+    ['binCount', 'grossKg', 'tarePerBin', 'leavesKg', 'sample10g'].forEach(function (id) {
+      $(id).addEventListener('input', calcNetPreview);
+    });
+
+    document.querySelectorAll('.nav-btn').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        navigate(btn.getAttribute('data-page'));
+      });
+    });
+
+    $('btnCreateSheet').onclick = function () {
+      run('createNewSpreadsheet', [], function (data) {
+        showToast('הגיליון נוצר בהצלחה', 'success');
+        refreshBootstrap();
+      });
+    };
+
+    $('btnConnectSheet').onclick = function () {
+      var val = $('existingSheetInput').value.trim();
+      if (!val) {
+        showToast('הדביקו קישור או מזהה', 'error');
+        return;
+      }
+      run('connectExistingSpreadsheet', [val], function () {
+        showToast('הגיליון חובר', 'success');
+        refreshBootstrap();
+      });
+    };
+
+    $('btnReconnect').onclick = function () {
+      var val = $('reconnectInput').value.trim();
+      if (!val) {
+        showToast('הדביקו קישור או מזהה', 'error');
+        return;
+      }
+      run('connectExistingSpreadsheet', [val], function () {
+        showToast('החיבור עודכן', 'success');
+        refreshBootstrap();
+      });
+    };
+
+    $('btnSaveHarvest').onclick = function () {
+      if (!state.activeSeasonId) {
+        showToast('בחרו או צרו עונה לפני שמירה', 'error');
+        navigate('settings');
+        return;
+      }
+      var payload = collectHarvestPayload();
+      if (!payload.grossKg && payload.grossKg !== 0) {
+        showToast('נא להזין משקל ברוטו', 'error');
+        return;
+      }
+      run('saveHarvest', [payload], function () {
+        showToast('נשמר בהצלחה', 'success');
+        resetHarvestForm();
+        refreshHarvest();
+      });
+    };
+
+    $('btnSaveOil').onclick = function () {
+      if (!state.activeSeasonId) {
+        showToast('אין עונה נבחרת', 'error');
+        return;
+      }
+      run('saveOil', [{
+        seasonId: state.activeSeasonId,
+        quantity: Number($('oilQuantity').value),
+        unit: $('oilUnit').value,
+        density: state.settings.oil_density
+      }], function (oil) {
+        state.oil = oil;
+        renderOil();
+        showToast('כמות השמן נשמרה', 'success');
+      });
+    };
+
+    $('btnSaveSettings').onclick = function () {
+      run('updateAppSettings', [{
+        default_tare_kg: Number($('defaultTare').value),
+        oil_density: Number($('oilDensity').value)
+      }], function (settings) {
+        state.settings = settings;
+        if (!$('editingHarvestId').value) {
+          $('tarePerBin').value = settings.default_tare_kg;
+          calcNetPreview();
+        }
+        showToast('ההגדרות נשמרו', 'success');
+      });
+    };
+
+    $('btnAddPlot').onclick = function () { openPlotModal(); };
+    $('btnAddBin').onclick = function () { openBinModal(); };
+    $('btnAddSeason').onclick = function () {
+      if (!state.plots.length) {
+        showToast('צרו חלקה לפני עונה', 'error');
+        return;
+      }
+      openSeasonModal();
+    };
+
+    $('btnSwitchSeason').onclick = function () {
+      if (!state.seasons.length) {
+        showToast('אין עונות — צרו עונה בהגדרות', 'error');
+        navigate('settings');
+        return;
+      }
+      var options = state.seasons.map(function (s) {
+        return '<option value="' + escapeAttr(s.id) + '"' +
+          (s.id === state.activeSeasonId ? ' selected' : '') + '>' +
+          s.year + ' — ' + escapeHtml(s.plotName || '') +
+          '</option>';
+      }).join('');
+      openModal(
+        '<h3>החלפת עונה</h3>' +
+        '<div class="stack">' +
+          '<div class="field"><label for="switchSeason">עונה</label>' +
+          '<select id="switchSeason">' + options + '</select></div>' +
+          '<div class="row">' +
+            '<button type="button" class="btn btn-primary grow" id="modalSave">בחירה</button>' +
+            '<button type="button" class="btn btn-ghost grow" id="modalCancel">ביטול</button>' +
+          '</div>' +
+        '</div>'
+      );
+      $('modalCancel').onclick = closeModal;
+      $('modalSave').onclick = function () {
+        var id = $('switchSeason').value;
+        run('setActiveSeason', [id], function () {
+          closeModal();
+          state.activeSeasonId = id;
+          showToast('העונה הוחלפה', 'success');
+          refreshBootstrap();
+        });
+      };
+    };
+
+    $('statsSeason').onchange = loadStats;
+    $('statsPlot').onchange = loadStats;
+
+    $('modalBackdrop').addEventListener('click', function (e) {
+      if (e.target === $('modalBackdrop')) closeModal();
+    });
+  }
+
+  function init() {
+    bindEvents();
+    calcNetPreview();
+    run('getAppBootstrap', [], function (data) {
+      applyBootstrap(data);
+    }, function (err) {
+      // If bootstrap fails because not connected, show setup
+      showSetup(true);
+      if (err && err.indexOf('לא מחובר') === -1) {
+        showToast(err, 'error');
+      }
+    });
+  }
+
+  document.addEventListener('DOMContentLoaded', init);
+})();
+</script>

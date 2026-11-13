@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>יומן מסיק זיתים</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Heebo:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.6/dist/chart.umd.min.js"></script>
+  <?!= include('Styles'); ?>
+</head>
+<body>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <div id="loading" class="loading-overlay" aria-hidden="true"><div class="spinner"></div></div>
+
+  <!-- Setup screen -->
+  <div id="setupScreen" class="setup-wrap hidden">
+    <div class="setup-hero">
+      <h1>יומן מסיק זיתים</h1>
+      <p class="muted">מעקב פשוט אחר מסיק ושמן זית — מבוסס Google Sheets</p>
+    </div>
+    <div class="panel stack">
+      <h2>הגדרה ראשונית</h2>
+      <p class="muted small">בחרו ליצור גיליון חדש או לחבר גיליון קיים ב-Drive.</p>
+      <button type="button" class="btn btn-primary btn-block btn-lg" id="btnCreateSheet">יצירת גיליון חדש</button>
+      <div class="field">
+        <label for="existingSheetInput">או הדביקו קישור / מזהה גיליון קיים</label>
+        <input id="existingSheetInput" type="text" placeholder="https://docs.google.com/spreadsheets/d/..." autocomplete="off" />
+      </div>
+      <button type="button" class="btn btn-secondary btn-block" id="btnConnectSheet">חיבור לגיליון קיים</button>
+    </div>
+  </div>
+
+  <!-- Main app -->
+  <div id="appShell" class="app-shell hidden">
+    <header class="brand-bar">
+      <div class="brand">
+        <h1 class="brand-name">יומן מסיק זיתים</h1>
+        <p class="brand-sub" id="brandSub">טוען...</p>
+      </div>
+      <span class="chip ok" id="connChip">מחובר</span>
+    </header>
+
+    <!-- Page: Harvest -->
+    <section id="page-harvest" class="page active">
+      <div class="season-banner">
+        <div>
+          <div class="small muted">עונה נבחרת</div>
+          <strong id="activeSeasonLabel">—</strong>
+        </div>
+        <button type="button" class="btn btn-ghost" id="btnSwitchSeason">החלפת עונה</button>
+      </div>
+
+      <div class="panel stack" id="harvestEntryPanel">
+        <h2>שקילת דולב</h2>
+        <div class="two-col">
+          <div class="field">
+            <label for="binCount">מספר דולבים</label>
+            <input id="binCount" type="number" min="1" step="1" value="1" inputmode="numeric" />
+          </div>
+          <div class="field">
+            <label for="grossKg">משקל ברוטו (ק״ג)</label>
+            <input id="grossKg" type="number" min="0" step="0.1" inputmode="decimal" />
+          </div>
+        </div>
+        <div class="two-col">
+          <div class="field">
+            <label for="tarePerBin">טרה לדולב (ק״ג)</label>
+            <input id="tarePerBin" type="number" min="0" step="0.1" inputmode="decimal" />
+          </div>
+          <div class="field">
+            <label for="leavesKg">ניכוי עלים (ק״ג)</label>
+            <input id="leavesKg" type="number" min="0" step="0.1" inputmode="decimal" placeholder="אופציונלי" />
+          </div>
+        </div>
+        <div class="field">
+          <label for="arrivalAt">תאריך ושעה</label>
+          <input id="arrivalAt" type="datetime-local" />
+        </div>
+
+        <div class="net-hero">
+          <div class="label">משקל זיתים נטו</div>
+          <div class="value"><span id="netPreview">0.0</span><span class="unit">ק״ג</span></div>
+        </div>
+
+        <details class="advanced" id="advancedFields">
+          <summary>נתונים נוספים</summary>
+          <div class="stack" style="margin-top:10px">
+            <div class="two-col">
+              <div class="field">
+                <label for="sample10g">משקל 10 זיתים (גרם)</label>
+                <input id="sample10g" type="number" min="0" step="0.1" inputmode="decimal" placeholder="אופציונלי" />
+              </div>
+              <div class="field">
+                <label for="avgDiameterMm">קוטר ממוצע (מ״מ)</label>
+                <input id="avgDiameterMm" type="number" min="0" step="0.1" inputmode="decimal" placeholder="אופציונלי" />
+              </div>
+            </div>
+            <div class="row small muted">
+              <span>ממוצע לזית: <strong id="avgOlivePreview">—</strong></span>
+              <span>הערכת מספר זיתים: <strong id="estCountPreview">—</strong></span>
+            </div>
+            <p class="small muted">הערכת מספר הזיתים מבוססת על מדגם קטן בלבד.</p>
+            <div class="two-col">
+              <div class="field">
+                <label for="ripeness">בשלות</label>
+                <select id="ripeness">
+                  <option value="">—</option>
+                  <option value="ירוק">ירוק</option>
+                  <option value="תחילת שינוי צבע">תחילת שינוי צבע</option>
+                  <option value="מעורב">מעורב</option>
+                  <option value="כהה">כהה</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="fruitCondition">מצב פרי</label>
+                <select id="fruitCondition">
+                  <option value="">—</option>
+                  <option value="טוב">טוב</option>
+                  <option value="פגום חלקית">פגום חלקית</option>
+                  <option value="פגום">פגום</option>
+                </select>
+              </div>
+            </div>
+            <div class="field">
+              <label for="actualHarvestDate">תאריך מסיק בפועל</label>
+              <input id="actualHarvestDate" type="date" />
+            </div>
+            <div class="field">
+              <label for="harvestNotes">הערות</label>
+              <textarea id="harvestNotes" placeholder="אופציונלי"></textarea>
+            </div>
+          </div>
+        </details>
+
+        <button type="button" class="btn btn-primary btn-block btn-lg" id="btnSaveHarvest">שמור דולב</button>
+        <input type="hidden" id="editingHarvestId" value="" />
+      </div>
+
+      <div class="panel">
+        <h3>סיכום עונה</h3>
+        <div class="totals-grid" id="seasonTotals"></div>
+      </div>
+
+      <div class="panel stack">
+        <h3>ייצור שמן (עונה)</h3>
+        <div id="oilSummary" class="muted small">טרם הוזן</div>
+        <div class="two-col">
+          <div class="field">
+            <label for="oilQuantity">כמות שמן</label>
+            <input id="oilQuantity" type="number" min="0" step="0.1" inputmode="decimal" />
+          </div>
+          <div class="field">
+            <label for="oilUnit">יחידה</label>
+            <select id="oilUnit">
+              <option value="kg">ק״ג</option>
+              <option value="l">ליטר</option>
+            </select>
+          </div>
+        </div>
+        <button type="button" class="btn btn-oil btn-block" id="btnSaveOil">שמירת כמות שמן</button>
+      </div>
+
+      <div class="panel">
+        <div class="row" style="justify-content:space-between;margin-bottom:8px">
+          <h3 style="margin:0">רשומות מסיק</h3>
+          <span class="small muted" id="harvestCountLabel"></span>
+        </div>
+        <div id="harvestList" class="stack"></div>
+      </div>
+    </section>
+
+    <!-- Page: Stats -->
+    <section id="page-stats" class="page">
+      <div class="panel stack">
+        <h2>סטטיסטיקות</h2>
+        <div class="two-col">
+          <div class="field">
+            <label for="statsSeason">עונה / שנה</label>
+            <select id="statsSeason"></select>
+          </div>
+          <div class="field">
+            <label for="statsPlot">חלקה</label>
+            <select id="statsPlot"></select>
+          </div>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="kpi-grid" id="statsKpis"></div>
+      </div>
+      <div class="panel">
+        <h3>זיתים נטו לפי עונה</h3>
+        <div class="chart-box"><canvas id="chartNet"></canvas></div>
+      </div>
+      <div class="panel">
+        <h3>אחוז שמן לפי עונה</h3>
+        <div class="chart-box"><canvas id="chartYield"></canvas></div>
+      </div>
+      <div class="panel">
+        <h3>השוואה בין חלקות</h3>
+        <div id="plotCompare"></div>
+      </div>
+    </section>
+
+    <!-- Page: Settings -->
+    <section id="page-settings" class="page">
+      <div class="panel stack">
+        <h2>חיבור לגיליון</h2>
+        <div id="settingsConnection" class="small muted"></div>
+        <div class="field">
+          <label for="reconnectInput">חיבור מחדש לגיליון אחר</label>
+          <input id="reconnectInput" type="text" placeholder="קישור או מזהה" />
+        </div>
+        <div class="row">
+          <button type="button" class="btn btn-secondary grow" id="btnReconnect">חיבור</button>
+          <button type="button" class="btn btn-ghost grow" id="btnOpenSheet" target="_blank">פתיחת הגיליון</button>
+        </div>
+      </div>
+
+      <div class="panel stack">
+        <h2>הגדרות כלליות</h2>
+        <div class="two-col">
+          <div class="field">
+            <label for="defaultTare">טרה ברירת מחדל (ק״ג)</label>
+            <input id="defaultTare" type="number" min="0" step="0.1" />
+          </div>
+          <div class="field">
+            <label for="oilDensity">צפיפות שמן (ק״ג/ל׳)</label>
+            <input id="oilDensity" type="number" min="0.1" step="0.001" />
+          </div>
+        </div>
+        <button type="button" class="btn btn-primary" id="btnSaveSettings">שמירת הגדרות</button>
+      </div>
+
+      <div class="panel stack">
+        <div class="row" style="justify-content:space-between">
+          <h2 style="margin:0">חלקות</h2>
+          <button type="button" class="btn btn-secondary" id="btnAddPlot">הוספת חלקה</button>
+        </div>
+        <div id="plotsList"></div>
+      </div>
+
+      <div class="panel stack">
+        <div class="row" style="justify-content:space-between">
+          <h2 style="margin:0">דולבים שמורים</h2>
+          <button type="button" class="btn btn-secondary" id="btnAddBin">הוספת דולב</button>
+        </div>
+        <p class="small muted">אופציונלי — דולבים עם משקל טרה קבוע. שינוי טרה ברירת מחדל לא משנה רשומות ישנות.</p>
+        <div id="binsList"></div>
+      </div>
+
+      <div class="panel stack">
+        <div class="row" style="justify-content:space-between">
+          <h2 style="margin:0">עונות מסיק</h2>
+          <button type="button" class="btn btn-secondary" id="btnAddSeason">עונה חדשה</button>
+        </div>
+        <div id="seasonsList"></div>
+      </div>
+    </section>
+
+    <nav class="nav" aria-label="ניווט ראשי">
+      <button type="button" class="nav-btn active" data-page="harvest"><span class="dot"></span>מסיק</button>
+      <button type="button" class="nav-btn" data-page="stats"><span class="dot"></span>סטטיסטיקות</button>
+      <button type="button" class="nav-btn" data-page="settings"><span class="dot"></span>הגדרות</button>
+    </nav>
+  </div>
+
+  <!-- Generic modal -->
+  <div id="modalBackdrop" class="modal-backdrop" role="dialog" aria-modal="true">
+    <div class="modal" id="modalContent"></div>
+  </div>
+
+  <?!= include('Client'); ?>
+</body>
+</html>
